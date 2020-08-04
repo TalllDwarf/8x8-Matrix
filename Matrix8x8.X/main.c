@@ -46,32 +46,33 @@ struct {
     uint8_t charPos : 4; //the next column that needs adding
     uint8_t charUpdate : 1; //should the next column be added
     uint8_t emptyChar : 1; //empty char is pushed to matrix before resetting
-    uint8_t reserved : 1;
+    uint8_t firstStart : 1;
 } volatile pending = 
 {
     .eepromActive = 0,
     .emptyChar = 0,
     .charUpdate = 1,
-    .charPos = 0 
+    .charPos = 0,
+    .firstStart = 1
 };
 
 struct {
-    uint8_t* eepromAddress; //the eeprom memory address
-    uint8_t dataSize; //the amount of data to transfer to the eeprom
-    uint8_t* data;  //a pointer to the array of data
+    uint8_t* eepromAddress;
+    uint8_t dataSize;
+    uint8_t* data;
 } volatile eeprom_desc = {
   .eepromAddress = (uint8_t*)EEPROM_START,
   .data = NULL,
   .dataSize = 0
 };
 
-void shift_bits(uint32_t const negative, uint8_t positive);
-void write_eeprom(uint8_t* const buffer, uint8_t bufferSize);
-void load_buffer(uint8_t * buffer, uint8_t* bufferSize);
-
 //========================
 //UART
 //========================
+
+//Required functions
+void shift_bits(uint32_t const negative, uint8_t positive);
+void write_eeprom(uint8_t* const buffer, uint8_t bufferSize);
 
 void init_usart(uint16_t baud)
 {
@@ -132,11 +133,11 @@ void flush_uart()
 char check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
 {
     if(USART0_READ_READY)
-    {        
+    {
         char firstChar = read_char();
         
         //Commands start with + so ignore the command text
-        if(firstChar == '+')
+        if(firstChar < FIRST_LETTER_VALUE || firstChar == '+')
         {
             flush_uart();
         }
@@ -173,7 +174,6 @@ char check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
                 }
             }
 
-            NVMCTRL.INTCTRL = NVMCTRL_EEREADY_bm;
             write_eeprom(buffer, *bufferSize);
             return 1;
         }
@@ -210,9 +210,11 @@ ISR(TCA0_OVF_vect)
 //EEPROM
 //===========================
 
+//Required functions
+void load_buffer(uint8_t * buffer, uint8_t* bufferSize);
+
 void init_eeprom(uint8_t* buffer, uint8_t* bufferSize)
 {
-    //Enable eeprom interrupt   
     load_buffer(buffer, bufferSize);
 }
 
@@ -220,14 +222,15 @@ ISR(NVMCTRL_EE_vect)
 {       
     if(eeprom_desc.dataSize == 0)
     {
-        //Disable EEPROM interrupt        
+        //Disable EEPROM interrupt3
+        
         NVMCTRL.INTFLAGS &= ~NVMCTRL_EEREADY_bm;
         NVMCTRL.INTCTRL &= ~NVMCTRL_EEREADY_bm;
         pending.eepromActive = 0;
     }
     else
     {        
-        uint8_t size = ((eeprom_desc.dataSize < EEPROM_PAGE_SIZE) ? eeprom_desc.dataSize : EEPROM_PAGE_SIZE);
+        uint8_t size = ((eeprom_desc.dataSize <= EEPROM_PAGE_SIZE) ? eeprom_desc.dataSize : EEPROM_PAGE_SIZE);
         
         memcpy(eeprom_desc.eepromAddress, eeprom_desc.data, size);    
         eeprom_desc.eepromAddress += size;
@@ -259,10 +262,9 @@ void write_eeprom(uint8_t* buffer, uint8_t bufferSize)
     //set eeprom active stopping another message 
     pending.eepromActive = 1;
     
-    //First byte contains bufferSize
+    //First byte is bufferSize
     *eeprom_desc.eepromAddress++ = bufferSize;
     
-    //get the remaining size
     uint8_t size = ((eeprom_desc.dataSize <= (EEPROM_PAGE_SIZE - 1)) ? eeprom_desc.dataSize : (EEPROM_PAGE_SIZE - 1));
     
     //Copy data size to 
@@ -274,7 +276,6 @@ void write_eeprom(uint8_t* buffer, uint8_t bufferSize)
     CCP = CCP_SPM_gc;
     NVMCTRL.CTRLA = NVMCTRL_CMD_PAGEERASEWRITE_gc;
 
-    //Enable interrupts for eeprom
     NVMCTRL.INTFLAGS = NVMCTRL_EEREADY_bm;
     NVMCTRL.INTCTRL = NVMCTRL_EEREADY_bm;
 }
@@ -289,7 +290,7 @@ void load_buffer(uint8_t * buffer, uint8_t* bufferSize)
     uint8_t read = *(eepromMem++);
     
     //Max value is 0x7F
-    if(read >= 0x7F)
+    if(read >= 0x80)
     {
         *bufferSize = 12; 
                 
@@ -309,7 +310,7 @@ void load_buffer(uint8_t * buffer, uint8_t* bufferSize)
     else
     {
         *bufferSize = read;        
-        memcpy(buffer, eepromMem, *bufferSize);
+        memcpy(buffer, eepromMem, read);
     }
 }
 
