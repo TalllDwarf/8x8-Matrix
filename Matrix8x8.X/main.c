@@ -212,9 +212,7 @@ ISR(TCA0_OVF_vect)
 
 void init_eeprom(uint8_t* buffer, uint8_t* bufferSize)
 {
-    //Enable eeprom interrupt
-    //NVMCTRL.INTCTRL = NVMCTRL_EEREADY_bm;
-   
+    //Enable eeprom interrupt   
     load_buffer(buffer, bufferSize);
 }
 
@@ -222,29 +220,33 @@ ISR(NVMCTRL_EE_vect)
 {       
     if(eeprom_desc.dataSize == 0)
     {
-        //Disable EEPROM interrupt
+        //Disable EEPROM interrupt        
         NVMCTRL.INTFLAGS &= ~NVMCTRL_EEREADY_bm;
-        pending.eepromActive = 0;
         NVMCTRL.INTCTRL &= ~NVMCTRL_EEREADY_bm;
+        pending.eepromActive = 0;
     }
     else
-    {
-        //Clear flag manually
-        NVMCTRL.INTFLAGS = NVMCTRL_EEREADY_bm;
+    {        
+        uint8_t size = ((eeprom_desc.dataSize < EEPROM_PAGE_SIZE) ? eeprom_desc.dataSize : EEPROM_PAGE_SIZE);
         
-        while(((uint16_t)eeprom_desc.eepromAddress % EEPROM_PAGE_SIZE) != 0 && eeprom_desc.dataSize != 0)
-        {
-            *eeprom_desc.eepromAddress++ = *eeprom_desc.data++;
-            eeprom_desc.dataSize--;
-        } 
+        memcpy(eeprom_desc.eepromAddress, eeprom_desc.data, size);    
+        eeprom_desc.eepromAddress += size;
+        eeprom_desc.data += size;
+        eeprom_desc.dataSize -= size;
         
         CCP = CCP_SPM_gc;
         NVMCTRL.CTRLA = NVMCTRL_CMD_PAGEERASEWRITE_gc;
+    
+        //Clear flag manually
+        NVMCTRL.INTFLAGS = NVMCTRL_EEREADY_bm;
     }
 }
 
 void write_eeprom(uint8_t* buffer, uint8_t bufferSize)
 {
+    if(bufferSize == 0)
+        return;
+    
     //If eeprom is not busy
     while((NVMCTRL.STATUS & NVMCTRL_EEBUSY_bm) != 0x00)
     {;}
@@ -257,17 +259,24 @@ void write_eeprom(uint8_t* buffer, uint8_t bufferSize)
     //set eeprom active stopping another message 
     pending.eepromActive = 1;
     
-    //First byte is bufferSize
+    //First byte contains bufferSize
     *eeprom_desc.eepromAddress++ = bufferSize;
-
-    while(((uint16_t)eeprom_desc.eepromAddress % EEPROM_PAGE_SIZE) != 0 && eeprom_desc.dataSize != 0)
-    {
-        *eeprom_desc.eepromAddress++ = *eeprom_desc.data++;
-        eeprom_desc.dataSize--;
-    }    
+    
+    //get the remaining size
+    uint8_t size = ((eeprom_desc.dataSize <= (EEPROM_PAGE_SIZE - 1)) ? eeprom_desc.dataSize : (EEPROM_PAGE_SIZE - 1));
+    
+    //Copy data size to 
+    memcpy(eeprom_desc.eepromAddress, eeprom_desc.data, size);    
+    eeprom_desc.eepromAddress += size;
+    eeprom_desc.data += size;
+    eeprom_desc.dataSize -= size;
     
     CCP = CCP_SPM_gc;
     NVMCTRL.CTRLA = NVMCTRL_CMD_PAGEERASEWRITE_gc;
+
+    //Enable interrupts for eeprom
+    NVMCTRL.INTFLAGS = NVMCTRL_EEREADY_bm;
+    NVMCTRL.INTCTRL = NVMCTRL_EEREADY_bm;
 }
 
 void load_buffer(uint8_t * buffer, uint8_t* bufferSize)
@@ -277,7 +286,7 @@ void load_buffer(uint8_t * buffer, uint8_t* bufferSize)
     
     uint8_t* eepromMem = (uint8_t*)EEPROM_START;
     
-    unsigned char read = *eepromMem++;
+    uint8_t read = *(eepromMem++);
     
     //Max value is 0x7F
     if(read >= 0x7F)
