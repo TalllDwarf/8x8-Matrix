@@ -41,19 +41,24 @@ FUSES =
 #define CLOCK PIN3_bm
 #define DATA PIN1_bm
 
+//COMMANDS
+#define CMD_SPEED 1
+#define CMD_CLEAR_EEPROM 2
+#define CMD_SAVE_TO_EEPROM 3
+
 struct {
     uint8_t eepromActive : 1; //Is the eeprom active
     uint8_t charPos : 4; //the next column that needs adding
     uint8_t charUpdate : 1; //should the next column be added
     uint8_t emptyChar : 1; //empty char is pushed to matrix before resetting
-    uint8_t firstStart : 1;
+    uint8_t saveToEeprom : 1;
 } volatile pending = 
 {
     .eepromActive = 0,
     .emptyChar = 0,
     .charUpdate = 1,
     .charPos = 0,
-    .firstStart = 1
+    .saveToEeprom = 0
 };
 
 struct {
@@ -84,7 +89,7 @@ void init_usart(uint16_t baud)
     USART0.CTRLB |= (USART_RXEN_bm | USART_TXEN_bm);   
 }
 
-void send_char(char c)
+void send_char(uint8_t c)
 {
     while(!USART0_WRITE_READY)
     { ; }
@@ -92,7 +97,7 @@ void send_char(char c)
     USART0.TXDATAL = c;
 }
 
-void send_string(char *str)
+void send_string(uint8_t *str)
 {
     while(str != NULL && *str != '\0')
     {
@@ -101,7 +106,7 @@ void send_string(char *str)
     }
 }
 
-char read_char(void)
+uint8_t read_char(void)
 {
     while(!USART0_READ_READY)
     {   ;   }
@@ -109,9 +114,29 @@ char read_char(void)
     return USART0.RXDATAL;
 }
 
+uint8_t read_char_timeout(void)
+{
+    int8_t delay = 4;
+    pending.charUpdate = 0;
+    
+    while(delay > 0)
+    {
+        if(USART0_READ_READY)
+            return read_char();
+        
+        if(pending.charUpdate == 1)
+        {
+            delay--;
+            pending.charUpdate = 0;
+        }
+    }
+    
+    return 0;
+}
+
 void flush_uart()
 {
-    signed char delay = 4;
+    int8_t delay = 4;
     pending.charUpdate = 0;
     
     while(delay > 0)
@@ -130,16 +155,74 @@ void flush_uart()
     }
 }
 
-char check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
+void parse_command(uint8_t commandChar)
+{
+    if(commandChar == '+')
+    {
+        flush_uart();
+    }
+    else
+    {
+        uint8_t val;
+        switch(commandChar)
+        {
+            //Lower = faster
+            case CMD_SPEED:
+                val = read_char_timeout();              
+                
+                if(val == 0)
+                    break;
+                
+                //max Speed
+                if(val < 0x50)
+                    val = 0x50;
+                
+                TCA0.SINGLE.PER = ((uint16_t)val * 2);
+                break;
+                
+            case CMD_CLEAR_EEPROM:
+                eeprom_desc.eepromAddress = (uint8_t*)EEPROM_START;     
+                
+                if(*eeprom_desc.eepromAddress != 0xFF)
+                {                
+                    //Add value to first eeprom address
+                    *eeprom_desc.eepromAddress = 0xFF;
+
+                    //Call eeprom erase will only erase first address
+                    CCP = CCP_SPM_gc;
+                    NVMCTRL.CTRLA = NVMCTRL_CMD_EEERASE_gc;
+                }
+                break;
+                
+            case CMD_SAVE_TO_EEPROM:
+                val = read_char_timeout();
+                
+                if(val == 0)
+                    break;
+                
+                if(val == 1)
+                    pending.saveToEeprom = 1;
+                else 
+                    pending.saveToEeprom = 0;
+                
+                break;
+            default:
+                flush_uart();
+                break;
+        }
+    }
+}
+
+uint8_t check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
 {
     if(USART0_READ_READY)
     {
-        char firstChar = read_char();
+        uint8_t firstChar = read_char();
         
         //Commands start with + so ignore the command text
-        if(firstChar < FIRST_LETTER_VALUE || firstChar == '+')
+        if(firstChar < SPACE_ASCII_VALUE || firstChar == '+')
         {
-            flush_uart();
+            parse_command(firstChar);
         }
         else
         {
@@ -148,7 +231,7 @@ char check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
 
             //Reset buffer;
             *bufferSize = 1;
-            char done = 0;            
+            uint8_t done = 0;            
             
             //Clear buffer
             memset(buffer, '\0', BUFFER_SIZE);
@@ -160,7 +243,7 @@ char check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
                 {
                     buffer[*bufferSize] = read_char();
 
-                    if(buffer[*bufferSize] == '\n')
+                    if(buffer[*bufferSize] < SPACE_ASCII_VALUE)
                         done = 1;
 
                     ++(*bufferSize);
@@ -174,7 +257,10 @@ char check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
                 }
             }
 
-            write_eeprom(buffer, *bufferSize);
+            //Should the message be saved to eeprom
+            if(pending.saveToEeprom)
+                write_eeprom(buffer, *bufferSize);
+            
             return 1;
         }
     }
@@ -329,7 +415,7 @@ void write_byte(uint8_t data)
 {
     PORTA.OUT &= ~(DATA | CLOCK);
     
-    for(signed char i = 7; i >= 0; --i)
+    for(int8_t i = 7; i >= 0; --i)
     {
         PORTA.OUT &= ~(CLOCK);
         
@@ -365,9 +451,9 @@ uint8_t scroll_matrix(uint32_t* const matrix, uint8_t letter)
     {      
         pending.charUpdate = 0;
         
-        if(pending.emptyChar == 1 || letter < FIRST_LETTER_VALUE)
+        if(pending.emptyChar == 1 || letter < FIRST_ASCII_VALUE)
         {
-            for(unsigned char i = 0; i < 8; ++i)
+            for(int8_t i = 0; i < 8; ++i)
             {
                 matrix[i] = (matrix[i] << 1);
             }
@@ -379,7 +465,7 @@ uint8_t scroll_matrix(uint32_t* const matrix, uint8_t letter)
             if(pending.charPos == character->size)
             {
                 //Add single line to split characters
-                for(unsigned char i = 0; i < 8; ++i)
+                for(int8_t i = 0; i < 8; ++i)
                 {
                     matrix[i] = (matrix[i] << 1);
                 }
@@ -389,7 +475,7 @@ uint8_t scroll_matrix(uint32_t* const matrix, uint8_t letter)
             }
             else
             {            
-                for(unsigned char i = 0; i < 8; ++i)
+                for(int8_t i = 0; i < 8; ++i)
                 {
                     matrix[i] = (matrix[i] << 1);
                     

@@ -10,7 +10,15 @@
 
 #define CREATE_CHAR(X) {c##X, (sizeof(c##X) / sizeof(c##X[0]))}
 #define GET_LETTER(letter) (LETTERS + (letter - 33))
-#define FIRST_LETTER_VALUE 33
+#define FIRST_ASCII_VALUE 33
+
+#define SPACE_ASCII_VALUE 32
+#define ZERO_ASCII_VALUE 48
+#define NINE_ASCII_VALUE 57
+#define A_ASCII_VALUE 65
+#define Z_ASCII_VALUE 90
+#define a_ASCII_VALUE 97
+#define z_ASCII_VALUE 122
 
 //!
 const unsigned char c33[] = {
