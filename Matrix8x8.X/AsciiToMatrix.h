@@ -11,6 +11,7 @@
 #define CREATE_CHAR(X) {c##X, (sizeof(c##X) / sizeof(c##X[0]))}
 #define GET_LETTER(letter) (LETTERS + (letter - 33))
 #define FIRST_ASCII_VALUE 33
+#define LAST_ASCII_VALUE 127
 
 #define SPACE_ASCII_VALUE 32
 #define ZERO_ASCII_VALUE 48

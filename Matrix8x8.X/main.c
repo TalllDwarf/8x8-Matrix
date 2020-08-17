@@ -41,24 +41,39 @@ FUSES =
 #define CLOCK PIN3_bm
 #define DATA PIN1_bm
 
-//COMMANDS
-#define CMD_SPEED 1
-#define CMD_CLEAR_EEPROM 2
-#define CMD_SAVE_TO_EEPROM 3
+//COMMANDS 1-30
+#define CMD_READY 0
+#define CMD_IGNORE 1
+#define CMD_SPEED 2
+#define CMD_CLEAR_EEPROM 3
+#define CMD_SAVE_TO_EEPROM 4
+#define CMD_END_OF_TEXT 10
+#define CMD_END 32
+
+#define NEW_LINE 10
 
 struct {
-    uint8_t eepromActive : 1; //Is the eeprom active
     uint8_t charPos : 4; //the next column that needs adding
     uint8_t charUpdate : 1; //should the next column be added
     uint8_t emptyChar : 1; //empty char is pushed to matrix before resetting
     uint8_t saveToEeprom : 1;
+    uint8_t reserved : 1;
 } volatile pending = 
 {
-    .eepromActive = 0,
     .emptyChar = 0,
     .charUpdate = 1,
     .charPos = 0,
     .saveToEeprom = 0
+};
+
+struct { 
+    uint8_t commandID : 5;
+    uint8_t readingText : 1;
+    uint8_t reserved : 2;
+} Commands = {
+    .commandID = 0,
+    .readingText = 0,
+    .reserved = 0
 };
 
 struct {
@@ -97,15 +112,6 @@ void send_char(uint8_t c)
     USART0.TXDATAL = c;
 }
 
-void send_string(uint8_t *str)
-{
-    while(str != NULL && *str != '\0')
-    {
-        send_char(*str);
-        ++str;
-    }
-}
-
 uint8_t read_char(void)
 {
     while(!USART0_READ_READY)
@@ -114,157 +120,136 @@ uint8_t read_char(void)
     return USART0.RXDATAL;
 }
 
-uint8_t read_char_timeout(void)
+uint8_t store_message(uint8_t read, uint8_t * const bufferSize, uint8_t* const buffer)
 {
-    int8_t delay = 4;
-    pending.charUpdate = 0;
-    
-    while(delay > 0)
+    //if read was a command value
+    if(read < CMD_END)
     {
-        if(USART0_READ_READY)
-            return read_char();
-        
-        if(pending.charUpdate == 1)
-        {
-            delay--;
-            pending.charUpdate = 0;
-        }
+        Commands.commandID = CMD_READY;
+        Commands.readingText = 0;
+
+        //Should the message be saved to eeprom
+        if(pending.saveToEeprom)
+            write_eeprom(buffer, *bufferSize);
+
+        return 1;
+    }
+
+    if(*bufferSize < BUFFER_SIZE)
+    {
+        buffer[*bufferSize] = read;
+        ++(*bufferSize);
+    }
+
+    //Overflow
+    if(*bufferSize == BUFFER_SIZE)
+    {
+        Commands.commandID = CMD_IGNORE;
+        return 1;
     }
     
     return 0;
 }
 
-void flush_uart()
+uint8_t check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
 {
-    int8_t delay = 4;
-    pending.charUpdate = 0;
+    uint8_t readChar = read_char();
     
-    while(delay > 0)
+    if(Commands.readingText)
     {
-        if(USART0_READ_READY)
-        {
-            read_char();
-            delay = 4;
-        }
-
-        if(pending.charUpdate == 1)
-        {
-            delay--;
-            pending.charUpdate = 0;
-        }
+        return store_message(readChar, bufferSize, buffer);
     }
-}
-
-void parse_command(uint8_t commandChar)
-{
-    if(commandChar == '+')
-    {
-        flush_uart();
-    }
-    else
-    {
-        uint8_t val;
-        switch(commandChar)
+        
+    //Set the command char and wait for the next byte
+    if (Commands.commandID == CMD_READY)
+    {            
+        switch(readChar)
         {
-            //Lower = faster
-            case CMD_SPEED:
-                val = read_char_timeout();              
-                
-                if(val == 0)
-                    break;
-                
-                //max Speed
-                if(val < 0x50)
-                    val = 0x50;
-                
-                TCA0.SINGLE.PER = ((uint16_t)val * 2);
+            //If it starts with a + ignore the command
+            //these are sent by the bluetooth device
+            case '+':                
+                Commands.commandID = CMD_IGNORE;
                 break;
                 
             case CMD_CLEAR_EEPROM:
+                
                 eeprom_desc.eepromAddress = (uint8_t*)EEPROM_START;     
                 
+                //if the first byte has been written to
                 if(*eeprom_desc.eepromAddress != 0xFF)
                 {                
-                    //Add value to first eeprom address
+                    //Value needs to be set to initiate the erase on the first page
                     *eeprom_desc.eepromAddress = 0xFF;
 
-                    //Call eeprom erase will only erase first address
+                    //Call eeprom erase
                     CCP = CCP_SPM_gc;
                     NVMCTRL.CTRLA = NVMCTRL_CMD_EEERASE_gc;
                 }
                 break;
                 
-            case CMD_SAVE_TO_EEPROM:
-                val = read_char_timeout();
+            default:
+                if(readChar < CMD_END)
+                    Commands.commandID = readChar;
+                else
+                {
+                    //Reset buffer;
+                    *bufferSize = 0;          
+
+                    //Clear buffer
+                    memset(buffer, '\0', BUFFER_SIZE);
+                    buffer[0] = readChar;
+                    
+                    return store_message(readChar, bufferSize, buffer);
+                }
+                break;
+        }
+    }
+    else
+    {
+        switch(Commands.commandID)
+        {
+            case CMD_SPEED:
                 
-                if(val == 0)
+                if(readChar == 0)
+                {
+                    Commands.commandID = CMD_READY;
                     break;
+                }
+                    
+                //Lower = faster
+                //max Speed
+                if(readChar < 0x50)
+                    readChar = 0x50;
                 
-                if(val == 1)
+                TCA0.SINGLE.PER = ((uint16_t)readChar * 2);
+                break;
+                
+            case CMD_SAVE_TO_EEPROM:  
+                
+                if(readChar == 0)
+                {
+                    Commands.commandID = CMD_READY;
+                    break;
+                }
+                    
+                if(readChar == 1)
                     pending.saveToEeprom = 1;
                 else 
                     pending.saveToEeprom = 0;
+                break;
                 
+            case CMD_IGNORE:
+                
+                if(readChar == CMD_END_OF_TEXT )
+                    Commands.commandID = CMD_READY;
                 break;
+                
             default:
-                flush_uart();
-                break;
+                break;                
         }
-    }
-}
-
-uint8_t check_usart(uint8_t * const bufferSize, uint8_t* const buffer)
-{
-    if(USART0_READ_READY)
-    {
-        uint8_t firstChar = read_char();
         
-        //Commands start with + so ignore the command text
-        if(firstChar < SPACE_ASCII_VALUE || firstChar == '+')
-        {
-            parse_command(firstChar);
-        }
-        else
-        {
-            //Clear matrix
-            shift_bits(0x00000000, 0x00);        
-
-            //Reset buffer;
-            *bufferSize = 1;
-            uint8_t done = 0;            
-            
-            //Clear buffer
-            memset(buffer, '\0', BUFFER_SIZE);
-            buffer[0] = firstChar;
-
-            while(done == 0)
-            {                
-                if(USART0_READ_READY && *bufferSize < BUFFER_SIZE)
-                {
-                    buffer[*bufferSize] = read_char();
-
-                    if(buffer[*bufferSize] < SPACE_ASCII_VALUE)
-                        done = 1;
-
-                    ++(*bufferSize);
-                }
-
-                //Overflow
-                if(*bufferSize == BUFFER_SIZE)
-                {
-                    flush_uart();
-                    done = 1;
-                }
-            }
-
-            //Should the message be saved to eeprom
-            if(pending.saveToEeprom)
-                write_eeprom(buffer, *bufferSize);
-            
-            return 1;
-        }
+        Commands.commandID = CMD_READY;
     }
-    
     return 0;
 }
 
@@ -312,7 +297,6 @@ ISR(NVMCTRL_EE_vect)
         
         NVMCTRL.INTFLAGS &= ~NVMCTRL_EEREADY_bm;
         NVMCTRL.INTCTRL &= ~NVMCTRL_EEREADY_bm;
-        pending.eepromActive = 0;
     }
     else
     {        
@@ -337,16 +321,13 @@ void write_eeprom(uint8_t* buffer, uint8_t bufferSize)
         return;
     
     //If eeprom is not busy
-    while((NVMCTRL.STATUS & NVMCTRL_EEBUSY_bm) != 0x00)
+    while(bit_is_set(NVMCTRL.STATUS, NVMCTRL_EEBUSY_bp))
     {;}
     
     //Setup eeprom desc
     eeprom_desc.eepromAddress = (uint8_t*)EEPROM_START;
     eeprom_desc.dataSize = bufferSize;
     eeprom_desc.data = buffer;
-
-    //set eeprom active stopping another message 
-    pending.eepromActive = 1;
     
     //First byte is bufferSize
     *eeprom_desc.eepromAddress++ = bufferSize;
@@ -359,9 +340,11 @@ void write_eeprom(uint8_t* buffer, uint8_t bufferSize)
     eeprom_desc.data += size;
     eeprom_desc.dataSize -= size;
     
+    //Start page erase and write operation
     CCP = CCP_SPM_gc;
     NVMCTRL.CTRLA = NVMCTRL_CMD_PAGEERASEWRITE_gc;
 
+    //Enable EEPROM interrupt
     NVMCTRL.INTFLAGS = NVMCTRL_EEREADY_bm;
     NVMCTRL.INTCTRL = NVMCTRL_EEREADY_bm;
 }
@@ -371,8 +354,7 @@ void load_buffer(uint8_t * buffer, uint8_t* bufferSize)
     while((NVMCTRL.STATUS & NVMCTRL_EEBUSY_bm) != 0x00)
     {;}
     
-    uint8_t* eepromMem = (uint8_t*)EEPROM_START;
-    
+    uint8_t* eepromMem = (uint8_t*)EEPROM_START;    
     uint8_t read = *(eepromMem++);
     
     //Max value is 0x7F
@@ -523,38 +505,42 @@ int main(void)
     {               
         //If saving previous message ignore incoming usart
         //Check usart if a new message clear matrix
-        if(!pending.eepromActive && check_usart(&bufferSize, buffer))
+        if(check_usart(&bufferSize, buffer))
         {
             textPos = 0;
             i_Matrix = 0;
             pending.emptyChar = 1;
             memset(matrix, 0, sizeof(matrix));
         }
-             
-        //Update matrix
-        if(scroll_matrix(matrix, buffer[textPos]))
+         
+        if(Commands.readingText)
         {
-            if(pending.emptyChar == 1)
+        
+            //Update matrix
+            if(scroll_matrix(matrix, buffer[textPos]))
             {
-                pending.emptyChar = 0;
-            }
-            else
-            {            
-                textPos++;
-
-                if(textPos >= bufferSize)
+                if(pending.emptyChar == 1)
                 {
-                    pending.emptyChar = 1;
-                    textPos = 0;
+                    pending.emptyChar = 0;
+                }
+                else
+                {            
+                    textPos++;
+
+                    if(textPos >= bufferSize)
+                    {
+                        pending.emptyChar = 1;
+                        textPos = 0;
+                    }
                 }
             }
-        }
 
-        //Shift out bits
-        shift_bits(matrix[i_Matrix], (0x01 << i_Matrix));
-        i_Matrix++;
-        
-        if(i_Matrix >= 8)
-            i_Matrix = 0;
+            //Shift out bits
+            shift_bits(matrix[i_Matrix], (0x01 << i_Matrix));
+            i_Matrix++;
+
+            if(i_Matrix >= 8)
+                i_Matrix = 0;
+        }
     }
 }
